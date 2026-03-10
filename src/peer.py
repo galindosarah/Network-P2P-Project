@@ -5,6 +5,7 @@ class Peer:
         self.port = port
         self.hasFile = hasFile
         self.bitfield = bitfield
+        
     def printInfo(self):
         print(f"Peer ID: {self.peerId}")
         print(f"Host Name: {self.hostName}")

@@ -12,16 +12,13 @@ def loadCommon(filename):
 
             common[key] = value
 
-    # common = {
-    #     "NumberOfPreferredNeighbors": int(config["NumberOfPreferredNeighbors"]),
-    #     "UnchokingInterval": int(config["UnchokingInterval"]),
-    #     "OptimisticUnchokingInterval": int(config["OptimisticUnchokingInterval"]),
-    #     "FileName": config["FileName"],
-    #     "FileSize": int(config["FileSize"]),
-    #     "PieceSize": int(config["PieceSize"]),
-    # }
+    common["NumberOfPreferredNeighbors"] = int(common["NumberOfPreferredNeighbors"])
+    common["UnchokingInterval"] = int(common["UnchokingInterval"])
+    common["OptimisticUnchokingInterval"] = int(common["OptimisticUnchokingInterval"])
+    common["FileSize"] = int(common["FileSize"])
+    common["PieceSize"] = int(common["PieceSize"])
 
-    common["numPieces"] = math.ceil(int(common["FileSize"]) / int(common["PieceSize"]))
+    common["numPieces"] = math.ceil(common["FileSize"] / common["PieceSize"])
     
     return common
 

@@ -1,8 +1,34 @@
 import sys
+import socket
+
 from config import loadCommon, loadPeerInfo, findPeerById
 from peer import Peer
 from pathlib import Path
 
+def startServer(port):
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.bind(("localhost", port))
+    server.listen()
+
+    print(f"Peer listening on port {port}...")
+
+    conn, addr = server.accept()
+    print(f"Connection received from {addr}")
+
+    conn.close()
+    server.close()
+
+
+def connectToPeer(host, port):
+    client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+
+    print(f"Connecting to {host}:{port}...")
+
+    client.connect((host, port))
+
+    print("Connected successfully!")
+
+    client.close()
 
 def main():
     if len(sys.argv) != 2:
@@ -39,8 +65,20 @@ def main():
     else:
         bitfield = [0] * numPieces
 
-    currentPeer = Peer(peerId, myPeer["hostName"], myPeer["port"], myPeer["hasFile"], bitfield)
+    currentPeer = Peer(
+        myPeer["peerId"], 
+        myPeer["hostName"], 
+        myPeer["port"], 
+        myPeer["hasFile"], 
+        bitfield)
     currentPeer.printInfo()
+
+    print()
+
+    if peerId == 1001:
+        startServer(currentPeer.port)
+    else:
+        connectToPeer(currentPeer.hostName, currentPeer.port)
 
 
 if __name__ == "__main__":
