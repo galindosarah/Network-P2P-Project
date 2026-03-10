@@ -1,62 +1,56 @@
-# config.py
-
 import math
 
-
-def load_common_cfg(filename):
-    config = {}
+def loadCommon(filename):
+    common = {}
 
     with open(filename, "r") as file:
         for line in file:
-            line = line.strip()
-            if line == "":
-                continue
+            # line = line.strip()
+            columns = line.split()
+            key = columns[0]
+            value = columns[1]
 
-            parts = line.split()
-            key = parts[0]
-            value = parts[1]
+            common[key] = value
 
-            config[key] = value
+    # common = {
+    #     "NumberOfPreferredNeighbors": int(config["NumberOfPreferredNeighbors"]),
+    #     "UnchokingInterval": int(config["UnchokingInterval"]),
+    #     "OptimisticUnchokingInterval": int(config["OptimisticUnchokingInterval"]),
+    #     "FileName": config["FileName"],
+    #     "FileSize": int(config["FileSize"]),
+    #     "PieceSize": int(config["PieceSize"]),
+    # }
 
-    common = {
-        "NumberOfPreferredNeighbors": int(config["NumberOfPreferredNeighbors"]),
-        "UnchokingInterval": int(config["UnchokingInterval"]),
-        "OptimisticUnchokingInterval": int(config["OptimisticUnchokingInterval"]),
-        "FileName": config["FileName"],
-        "FileSize": int(config["FileSize"]),
-        "PieceSize": int(config["PieceSize"]),
-    }
-
-    common["num_pieces"] = math.ceil(common["FileSize"] / common["PieceSize"])
-
+    common["numPieces"] = math.ceil(common["FileSize"] / common["PieceSize"])
+    print(common)
     return common
 
 
-def load_peer_info_cfg(filename):
+def loadPeerInfo(filename):
     peers = []
 
     with open(filename, "r") as file:
         for line in file:
-            line = line.strip()
-            if line == "":
-                continue
+            # line = line.strip()
+            # if line == "":
+            #     continue
 
-            parts = line.split()
+            columns = line.split()
 
             peer = {
-                "peer_id": int(parts[0]),
-                "host_name": parts[1],
-                "port": int(parts[2]),
-                "has_file": int(parts[3]),
+                "peerId": int(columns[0]),
+                "hostName": columns[1],
+                "port": int(columns[2]),
+                "hasFile": int(columns[3]),
             }
 
             peers.append(peer)
-
+    print(peers)
     return peers
 
 
-def find_peer_by_id(peer_list, peer_id):
-    for peer in peer_list:
-        if peer["peer_id"] == peer_id:
+def findPeerById(peerList, peerId):
+    for peer in peerList:
+        if peer["peerId"] == peerId:
             return peer
     return None
