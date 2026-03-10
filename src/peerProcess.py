@@ -1,59 +1,57 @@
-# peerProcess.py
-
 import sys
-from config import load_common_cfg, load_peer_info_cfg, find_peer_by_id
+from config import loadCommon, loadPeerInfo, findPeerById
 
 
 def main():
     # Step 1: make sure a peer ID was given
     if len(sys.argv) != 2:
-        print("Usage: python peerProcess.py <peer_id>")
+        print("Correct command format: python peerProcess.py <peerId>")
         sys.exit(1)
 
     # Step 2: convert the command-line argument to an integer
     try:
-        peer_id = int(sys.argv[1])
+        peerId = int(sys.argv[1])
     except ValueError:
-        print("Error: peer_id must be an integer.")
+        print("Error: peerId must be an integer.")
         sys.exit(1)
 
     # Step 3: read the two config files
     try:
-        common_config = load_common_cfg("Common.cfg")
-        peer_list = load_peer_info_cfg("PeerInfo.cfg")
+        commonConfig = loadCommon("Common.cfg")
+        peerList = loadPeerInfo("PeerInfo.cfg")
     except Exception as e:
         print(f"Error reading config files: {e}")
         sys.exit(1)
 
     # Step 4: find this peer in PeerInfo.cfg
-    my_peer = find_peer_by_id(peer_list, peer_id)
-    if my_peer is None:
-        print(f"Error: peer ID {peer_id} was not found in PeerInfo.cfg")
+    myPeer = findPeerById(peerList, peerId)
+    if myPeer is None:
+        print(f"Error: peer ID {peerId} was not found in PeerInfo.cfg")
         sys.exit(1)
 
     # Step 5: set up a very basic bitfield
-    num_pieces = common_config["num_pieces"]
+    numPieces = commonConfig["numPieces"]
 
-    if my_peer["has_file"] == 1:
-        bitfield = [1] * num_pieces
+    if myPeer["hasFile"] == 1:
+        bitfield = [1] * numPieces
     else:
-        bitfield = [0] * num_pieces
+        bitfield = [0] * numPieces
 
     # Step 6: print what we loaded so we know it works
     print("===== peerProcess started =====")
-    print(f"My peer ID: {peer_id}")
-    print(f"My host: {my_peer['host_name']}")
-    print(f"My port: {my_peer['port']}")
-    print(f"Has complete file: {my_peer['has_file']}")
+    print(f"My peer ID: {peerId}")
+    print(f"My host: {myPeer['hostName']}")
+    print(f"My port: {myPeer['port']}")
+    print(f"Has complete file: {myPeer['hasFile']}")
     print()
     print("Common.cfg values:")
-    print(common_config)
+    print(commonConfig)
     print()
     print("All peers from PeerInfo.cfg:")
-    for peer in peer_list:
+    for peer in peerList:
         print(peer)
     print()
-    print(f"Number of pieces: {num_pieces}")
+    print(f"Number of pieces: {numPieces}")
     print(f"Initial bitfield: {bitfield}")
 
 
