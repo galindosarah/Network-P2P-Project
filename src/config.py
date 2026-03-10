@@ -22,7 +22,7 @@ def loadCommon(filename):
     # }
 
     common["numPieces"] = math.ceil(int(common["FileSize"]) / int(common["PieceSize"]))
-    print(common)
+    
     return common
 
 
@@ -45,7 +45,7 @@ def loadPeerInfo(filename):
             }
 
             peers.append(peer)
-    print(peers)
+    
     return peers
 
 

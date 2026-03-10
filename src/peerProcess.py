@@ -1,5 +1,6 @@
 import sys
 from config import loadCommon, loadPeerInfo, findPeerById
+from peer import Peer
 from pathlib import Path
 
 
@@ -38,21 +39,8 @@ def main():
     else:
         bitfield = [0] * numPieces
 
-    print("...Peer Process Starts...")
-    print(f"My peer ID: {peerId}")
-    print(f"My host: {myPeer['hostName']}")
-    print(f"My port: {myPeer['port']}")
-    print(f"Has complete file: {myPeer['hasFile']}")
-    print()
-    print("Common.cfg values:")
-    print(commonConfig)
-    print()
-    print("All peers from PeerInfo.cfg:")
-    for peer in peerList:
-        print(peer)
-    print()
-    print(f"Number of pieces: {numPieces}")
-    print(f"Initial bitfield: {bitfield}")
+    currentPeer = Peer(peerId, myPeer["hostName"], myPeer["port"], myPeer["hasFile"], bitfield)
+    currentPeer.printInfo()
 
 
 if __name__ == "__main__":
