@@ -21,7 +21,7 @@ def loadCommon(filename):
     #     "PieceSize": int(config["PieceSize"]),
     # }
 
-    common["numPieces"] = math.ceil(common["FileSize"] / common["PieceSize"])
+    common["numPieces"] = math.ceil(int(common["FileSize"]) / int(common["PieceSize"]))
     print(common)
     return common
 
