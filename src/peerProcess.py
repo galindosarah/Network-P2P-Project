@@ -2,13 +2,14 @@ import sys
 import socket
 import struct
 import threading
+import random
 
 from config import loadCommon, loadPeerInfo, findPeerById
 from peer import Peer
 from pathlib import Path
 
 # Start server function
-def startServer(port, myPeerId, expectedConnections, myBitfield):
+def startServer(port, myPeerId, expectedConnections, myBitfield, filePath, pieceSize, fileSize):
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.bind(("localhost", port))
     server.listen()
@@ -16,37 +17,54 @@ def startServer(port, myPeerId, expectedConnections, myBitfield):
     print(f"Peer listening on port {port}...")
 
     for i in range(expectedConnections):
-        conn, addr = server.accept()
+        connection, addr = server.accept()
         print(f"Connection received from {addr}")
 
-        receivedPeerId = readHandshake(conn)
+        receivedPeerId = readHandshake(connection)
         print(f"Received handshake from peer {receivedPeerId}")
 
         handshake = createHandshake(myPeerId)
-        conn.sendall(handshake)
+        connection.sendall(handshake)
         print(f"Sent handshake from peer {myPeerId}")
 
-        messageType, payload = readMessage(conn)
+        messageType, payload = readMessage(connection)
         if messageType == 5:
             otherBitfield = payload.decode()
             print(f"Received bitfield from peer {receivedPeerId}: {otherBitfield}")
 
-        sendBitfield(conn, myBitfield)
+        sendBitfield(connection, myBitfield)
 
         if hasInterestingPieces(myBitfield, otherBitfield):
-            sendSimpleMessage(conn, 2)
+            sendSimpleMessage(connection, 2)
         else:
-            sendSimpleMessage(conn, 3)
+            sendSimpleMessage(connection, 3)
 
-        messageType, payload = readMessage(conn)
+        messageType, payload = readMessage(connection)
         if messageType == 2:
             print(f"Received INTERESTED from peer {receivedPeerId}")
-            sendUnchoke(conn)
+            sendSimpleMessage(connection, 1)
+
+            messageType, payload = readMessage(connection)
+            if messageType == 6:
+                requestedPieceIndex = struct.unpack(">I", payload)[0]
+                print(f"Received REQUEST for piece {requestedPieceIndex} from peer {receivedPeerId}")
+
+                pieceData = getPieceData(myBitfield, filePath, requestedPieceIndex, pieceSize, fileSize)
+                if pieceData is not None:
+                    sendPiece(connection, requestedPieceIndex, pieceData)
+
+                    messageType, payload = readMessage(connection)
+                    if messageType == 4:
+                        havePieceIndex = struct.unpack(">I", payload)[0]
+                        print(f"Received HAVE for piece {havePieceIndex} from peer {receivedPeerId}")
+
+                        otherBitfield = updateBitfieldWithHave(otherBitfield, havePieceIndex)
+                        print(f"Updated bitfield for peer {receivedPeerId}: {otherBitfield}")
+
         elif messageType == 3:
             print(f"Received NOT INTERESTED from peer {receivedPeerId}")
-            sendChoke(conn)
-
-        conn.close()
+            sendSimpleMessage(connection, 0)
+        connection.close()
 
     server.close()
 
@@ -74,7 +92,7 @@ def getLaterPeerCount(peerList, peerId):
 
     return count
 
-def connectToPeer(host, port, myPeerId, myBitfield):
+def connectToPeer(host, port, myPeerId, myBitfield, filePath, pieceSize):
     client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
     print(f"Connecting to {host}:{port}...")
@@ -115,6 +133,19 @@ def connectToPeer(host, port, myPeerId, myBitfield):
     elif messageType == 1:
         print(f"Received UNCHOKE from peer {receivedPeerId}")
 
+        pieceToRequest = choosePieceToRequest(myBitfield, otherBitfield)
+
+        if pieceToRequest is not None:
+            sendRequest(client, pieceToRequest)
+
+            messageType, payload = readMessage(client)
+            if messageType == 7:
+                pieceIndex = struct.unpack(">I", payload[:4])[0]
+                pieceData = payload[4:]
+
+                print(f"Received PIECE {pieceIndex} from peer {receivedPeerId}")
+                savePiece(myBitfield, filePath, pieceIndex, pieceSize, pieceData)
+                sendHave(client, pieceIndex)
 
     client.close()
 
@@ -235,6 +266,129 @@ def sendUnchoke(sock):
     sock.sendall(message)
     print("Sent UNCHOKE message")
 
+
+# Request function
+def sendRequest(sock, pieceIndex):
+    messageType = 6
+    payload = struct.pack(">I", pieceIndex)
+    messageLength = 1 + len(payload)
+
+    message = struct.pack(">I", messageLength)
+    message += struct.pack(">B", messageType)
+    message += payload
+
+    sock.sendall(message)
+    print(f"Sent REQUEST for piece {pieceIndex}")
+
+# Piece functions
+
+def sendPiece(sock, pieceIndex, pieceData):
+    messageType = 7
+    payload = struct.pack(">I", pieceIndex) + pieceData
+    messageLength = 1 + len(payload)
+
+    message = struct.pack(">I", messageLength)
+    message += struct.pack(">B", messageType)
+    message += payload
+
+    sock.sendall(message)
+    print(f"Sent PIECE {pieceIndex}")
+
+def getPieceData(bitfield, filePath, pieceIndex, pieceSize, fileSize):
+    if bitfield[pieceIndex] == 1:
+        return readPieceFromFile(filePath, pieceIndex, pieceSize, fileSize)
+    return None
+
+
+def savePiece(bitfield, filePath, pieceIndex, pieceSize, pieceData):
+    bitfield[pieceIndex] = 1
+    writePieceToFile(filePath, pieceIndex, pieceSize, pieceData)
+    print(f"Saved piece {pieceIndex} to {filePath}")
+    
+def choosePieceToRequest(myBitfield, otherBitfieldString):
+    possiblePieces = []
+
+    for i in range(len(myBitfield)):
+        if myBitfield[i] == 0 and otherBitfieldString[i] == "1":
+            possiblePieces.append(i)
+
+    if len(possiblePieces) == 0:
+        return None
+
+    return random.choice(possiblePieces)
+
+# Have functions
+def sendHave(sock, pieceIndex):
+    messageType = 4
+    payload = struct.pack(">I", pieceIndex)
+    messageLength = 1 + len(payload)
+
+    message = struct.pack(">I", messageLength)
+    message += struct.pack(">B", messageType)
+    message += payload
+
+    sock.sendall(message)
+    print(f"Sent HAVE for piece {pieceIndex}")
+
+def updateBitfieldWithHave(bitfieldString, pieceIndex):
+    bitfieldList = list(bitfieldString)
+    bitfieldList[pieceIndex] = "1"
+    return "".join(bitfieldList)
+
+# Peer folder functions
+def createPeerDirectory(peerId):
+    peerFolder = Path(str(peerId))
+    peerFolder.mkdir(exist_ok=True)
+    return peerFolder
+
+def getPeerFilePath(peerId, fileName):
+    peerFolder = createPeerDirectory(peerId)
+    return peerFolder / fileName
+
+def initializePeerFile(peerId, fileName, fileSize, hasFile):
+    filePath = getPeerFilePath(peerId, fileName)
+
+    if hasFile == 1:
+        if not filePath.exists():
+            print(f"Warning: peer {peerId} should start with the file, but {filePath} does not exist")
+    else:
+        if not filePath.exists():
+            with open(filePath, "wb") as file:
+                file.truncate(fileSize)
+
+    return filePath
+
+
+def getPieceOffset(pieceIndex, pieceSize):
+    return pieceIndex * pieceSize
+
+
+def getPieceLength(pieceIndex, pieceSize, fileSize):
+    pieceOffset = getPieceOffset(pieceIndex, pieceSize)
+    remainingBytes = fileSize - pieceOffset
+
+    if remainingBytes >= pieceSize:
+        return pieceSize
+    else:
+        return remainingBytes
+
+
+def readPieceFromFile(filePath, pieceIndex, pieceSize, fileSize):
+    pieceOffset = getPieceOffset(pieceIndex, pieceSize)
+    pieceLength = getPieceLength(pieceIndex, pieceSize, fileSize)
+
+    with open(filePath, "rb") as file:
+        file.seek(pieceOffset)
+        return file.read(pieceLength)
+
+
+def writePieceToFile(filePath, pieceIndex, pieceSize, pieceData):
+    pieceOffset = getPieceOffset(pieceIndex, pieceSize)
+
+    with open(filePath, "r+b") as file:
+        file.seek(pieceOffset)
+        file.write(pieceData)
+
 # Main function
 def main():
     if len(sys.argv) != 2:
@@ -283,6 +437,21 @@ def main():
 
     print()
 
+    fileName = commonConfig["FileName"]
+    fileSize = commonConfig["FileSize"]
+    pieceSize = commonConfig["PieceSize"]
+
+    filePath = initializePeerFile(
+        currentPeer.peerId,
+        fileName,
+        fileSize,
+        currentPeer.hasFile
+    )
+
+    print(f"My file path: {filePath}")
+
+    print()
+
     laterPeerCount = getLaterPeerCount(peerList, peerId)
 
     serverThread = threading.Thread(
@@ -291,7 +460,10 @@ def main():
             currentPeer.port, 
             currentPeer.peerId, 
             laterPeerCount, 
-            currentPeer.bitfield
+            currentPeer.bitfield,
+            filePath,
+            pieceSize,
+            fileSize
         )
     )
     serverThread.start()
@@ -303,7 +475,9 @@ def main():
             peer["hostName"], 
             peer["port"], 
             currentPeer.peerId, 
-            currentPeer.bitfield
+            currentPeer.bitfield,
+            filePath,
+            pieceSize
         )
 
     serverThread.join()
