@@ -398,13 +398,21 @@ def main():
     try:
         peerId = int(sys.argv[1])
     except ValueError:
-        print("Error: peerId must be an integer.")
+        print("Error: peerId must be an integer")
         sys.exit(1)
 
 
     baseDir = Path(".")
     commonCfgPath = baseDir / "Common.cfg"
     peerInfoCfgPath = baseDir / "PeerInfo.cfg"
+
+    if not commonCfgPath.exists():
+        print("Common.cfg not found")
+        return
+
+    if not peerInfoCfgPath.exists():
+        print("PeerInfo.cfg not found")
+        return
 
     try:
         commonConfig = loadCommon(commonCfgPath)
