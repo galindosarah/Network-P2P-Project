@@ -3,6 +3,7 @@ import socket
 import struct
 import threading
 import random
+import time
 
 from config import loadCommon, loadPeerInfo, findPeerById
 from peer import Peer
@@ -28,19 +29,38 @@ peerSocketsLock = threading.Lock()
 peerChokeStatus = {}
 peerChokeStatusLock = threading.Lock()
 
+interestedPeers = set()
+interestedPeersLock = threading.Lock()
+
+downloadCounts = {}
+downloadCountsLock = threading.Lock()
+
+optimisticallyUnchokedNeighbor = None
+optimisticNeighborLock = threading.Lock()
+
 # Start server function
 def startServer(port, myPeerId, expectedConnections, myBitfield, filePath, pieceSize, fileSize, totalPeerCount, peerList):
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.bind(("localhost", port))
     server.listen()
+    server.settimeout(1.0)
 
     print(f"Peer listening on port {port}...")
 
-    for i in range(expectedConnections):
+    acceptedConnections = 0
+
+    while acceptedConnections < expectedConnections:
         if shutdownEvent.is_set():
             break
 
-        connection, addr = server.accept()
+        try:
+            connection, addr = server.accept()
+        except socket.timeout:
+            continue
+        except OSError:
+            break
+
+        acceptedConnections += 1
         print(f"Connection received from {addr}")
 
         receivedPeerId = readHandshake(connection)
@@ -71,10 +91,10 @@ def startServer(port, myPeerId, expectedConnections, myBitfield, filePath, piece
         if "0" not in otherBitfield and not isPeerCompleted(receivedPeerId):
             markPeerCompleted(receivedPeerId)
 
-        if checkForGlobalCompletion(myPeerId, myBitfield, peerList):
-            cleanupPeerConnection(receivedPeerId)
-            connection.close()
-            return
+        # if checkForGlobalCompletion(myPeerId, myBitfield, peerList):
+        #     cleanupPeerConnection(receivedPeerId)
+        #     connection.close()
+        #     return
 
         sendBitfield(connection, myBitfield)
 
@@ -89,6 +109,7 @@ def startServer(port, myPeerId, expectedConnections, myBitfield, filePath, piece
         if messageType == 2:
             print(f"Received INTERESTED from peer {receivedPeerId}")
             writeLog(myPeerId, f"received the 'interested' message from Peer {receivedPeerId}.")
+            addInterestedPeer(receivedPeerId)
 
             currentPreferred = getPreferredNeighbors()
 
@@ -104,6 +125,8 @@ def startServer(port, myPeerId, expectedConnections, myBitfield, filePath, piece
         elif messageType == 3:
             print(f"Received NOT INTERESTED from peer {receivedPeerId}")
             writeLog(myPeerId, f"received the 'not interested' message from Peer {receivedPeerId}.")            
+            removeInterestedPeer(receivedPeerId)
+            
             sendSimpleMessage(connection, 0)
             cleanupPeerConnection(receivedPeerId)
             connection.close()
@@ -145,14 +168,15 @@ def startServer(port, myPeerId, expectedConnections, myBitfield, filePath, piece
                         markPeerCompleted(receivedPeerId)
                         print(f"Peer {receivedPeerId} has completed the file.")
 
-                if checkForGlobalCompletion(myPeerId, myBitfield, peerList):
+                if acceptedConnections == expectedConnections and checkForGlobalCompletion(myPeerId, myBitfield, peerList):
                     break
 
             elif messageType == 3:
                 print(f"Received NOT INTERESTED from peer {receivedPeerId}")
                 writeLog(myPeerId, f"received the 'not interested' message from Peer {receivedPeerId}.")
+                removeInterestedPeer(receivedPeerId)
 
-                if checkForGlobalCompletion(myPeerId, myBitfield, peerList):
+                if acceptedConnections == expectedConnections and checkForGlobalCompletion(myPeerId, myBitfield, peerList):
                     break
 
                 break
@@ -191,10 +215,36 @@ def getLaterPeerCount(peerList, peerId):
     return count
 
 def connectToPeer(host, port, myPeerId, myBitfield, filePath, pieceSize, totalPeerCount, peerList):
-    client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-
     print(f"Connecting to {host}:{port}...")
-    client.connect((host, port))
+
+    client = None
+    connected = False
+
+    import time
+
+    for attempt in range(10):
+        try:
+            client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            client.connect((host, port))
+            connected = True
+            break
+        except ConnectionRefusedError:
+            print(f"Connection to {host}:{port} refused, retrying...")
+            if client is not None:
+                client.close()
+                client = None
+            time.sleep(1)
+        except OSError as e:
+            print(f"Connection to {host}:{port} failed: {e}")
+            if client is not None:
+                client.close()
+                client = None
+            time.sleep(1)
+
+    if not connected or client is None:
+        print(f"Could not connect to {host}:{port}")
+        return
+
     print("Connected successfully!")
 
     handshake = createHandshake(myPeerId)
@@ -242,9 +292,11 @@ def connectToPeer(host, port, myPeerId, myBitfield, filePath, pieceSize, totalPe
     if messageType == 2:
         print(f"Received INTERESTED from peer {receivedPeerId}")
         writeLog(myPeerId, f"received the 'interested' message from Peer {receivedPeerId}.")
+        addInterestedPeer(receivedPeerId)
     elif messageType == 3:
         print(f"Received NOT INTERESTED from peer {receivedPeerId}")
         writeLog(myPeerId, f"received the 'not interested' message from Peer {receivedPeerId}.")
+        removeInterestedPeer(receivedPeerId)
     
     # Receive choke / unchoke
     messageType, payload = readMessage(client)
@@ -294,6 +346,7 @@ def connectToPeer(host, port, myPeerId, myBitfield, filePath, pieceSize, totalPe
 
         print(f"Received PIECE {pieceIndex} from peer {receivedPeerId}")
         savePiece(myBitfield, filePath, pieceIndex, pieceSize, pieceData)
+        recordDownloadFromPeer(receivedPeerId)
 
         pieceCount = sum(myBitfield)
         writeLog(
@@ -307,12 +360,6 @@ def connectToPeer(host, port, myPeerId, myBitfield, filePath, pieceSize, totalPe
         if all(myBitfield) and not isPeerCompleted(myPeerId):
             markPeerCompleted(myPeerId)
             writeLog(myPeerId, "has downloaded the complete file.")
-
-            if checkForGlobalCompletion(myPeerId, myBitfield, peerList):
-                break
-
-        if checkForGlobalCompletion(myPeerId, myBitfield, peerList):
-            break
 
         if not hasInterestingPieces(myBitfield, otherBitfield):
             sendSimpleMessage(client, 3)
@@ -368,25 +415,39 @@ def sendBitfield(sock, bitfield):
 
 
 def readMessage(sock):
-    messageLengthBytes = sock.recv(4)
+    try:
+        messageLengthBytes = sock.recv(4)
+    except (ConnectionResetError, OSError):
+        return None, None
+
     if len(messageLengthBytes) != 4:
         return None, None
 
     messageLength = struct.unpack(">I", messageLengthBytes)[0]
 
-    messageTypeBytes = sock.recv(1)
+    try:
+        messageTypeBytes = sock.recv(1)
+    except (ConnectionResetError, OSError):
+        return None, None
+
     if len(messageTypeBytes) != 1:
-        print("Error: could not read message type")
         return None, None
 
     messageType = struct.unpack(">B", messageTypeBytes)[0]
 
     payloadLength = messageLength - 1
-    payload = sock.recv(payloadLength)
+    payload = b""
 
-    if len(payload) != payloadLength:
-        print("Error: could not read full payload")
-        return None, None
+    while len(payload) < payloadLength:
+        try:
+            chunk = sock.recv(payloadLength - len(payload))
+        except (ConnectionResetError, OSError):
+            return None, None
+
+        if not chunk:
+            return None, None
+
+        payload += chunk
 
     return messageType, payload
 
@@ -624,10 +685,19 @@ def removeConnectedPeer(peerId):
 def cleanupPeerConnection(peerId):
     removePeerSocket(peerId)
     removeConnectedPeer(peerId)
+    removeInterestedPeer(peerId)
 
     with peerChokeStatusLock:
         if peerId in peerChokeStatus:
             del peerChokeStatus[peerId]
+
+    with downloadCountsLock:
+        if peerId in downloadCounts:
+            del downloadCounts[peerId]
+
+    currentOptimistic = getOptimisticallyUnchokedNeighbor()
+    if currentOptimistic == peerId:
+        setOptimisticallyUnchokedNeighbor(None)
 
 def setPreferredNeighbors(peerIds):
     with preferredNeighborsLock:
@@ -638,22 +708,37 @@ def getPreferredNeighbors():
     with preferredNeighborsLock:
         return set(preferredNeighbors)
 
-def runPreferredNeighborSelection(myPeerId, numberOfPreferredNeighbors, unchokingInterval):
+# def runPreferredNeighborSelection(myPeerId, numberOfPreferredNeighbors, unchokingInterval):
+#     while not shutdownEvent.is_set():
+#         shutdownEvent.wait(unchokingInterval)
+#         if shutdownEvent.is_set():
+#             break
+
+#         connected = getConnectedPeers()
+
+#         if len(connected) == 0:
+#             continue
+
+#         if len(connected) <= numberOfPreferredNeighbors:
+#             chosenNeighbors = connected
+#         else:
+#             chosenNeighbors = random.sample(connected, numberOfPreferredNeighbors)
+
+#         setPreferredNeighbors(chosenNeighbors)
+
+#         neighborListString = ", ".join(str(peerId) for peerId in sorted(chosenNeighbors))
+#         print(f"Preferred neighbors for peer {myPeerId}: {neighborListString}")
+#         writeLog(myPeerId, f"has the preferred neighbors {neighborListString}.")
+
+#         applyPreferredNeighborChoking(myPeerId)
+
+def runPreferredNeighborSelection(myPeerId, myBitfield, numberOfPreferredNeighbors, unchokingInterval):
     while not shutdownEvent.is_set():
         shutdownEvent.wait(unchokingInterval)
         if shutdownEvent.is_set():
             break
 
-        connected = getConnectedPeers()
-
-        if len(connected) == 0:
-            continue
-
-        if len(connected) <= numberOfPreferredNeighbors:
-            chosenNeighbors = connected
-        else:
-            chosenNeighbors = random.sample(connected, numberOfPreferredNeighbors)
-
+        chosenNeighbors = choosePreferredNeighbors(myBitfield, numberOfPreferredNeighbors)
         setPreferredNeighbors(chosenNeighbors)
 
         neighborListString = ", ".join(str(peerId) for peerId in sorted(chosenNeighbors))
@@ -661,6 +746,9 @@ def runPreferredNeighborSelection(myPeerId, numberOfPreferredNeighbors, unchokin
         writeLog(myPeerId, f"has the preferred neighbors {neighborListString}.")
 
         applyPreferredNeighborChoking(myPeerId)
+
+        # reset download counts for the next unchoking interval
+        resetDownloadCounts()
 
 def storePeerSocket(peerId, sock):
     with peerSocketsLock:
@@ -687,8 +775,38 @@ def getPeerChokeStatus(peerId):
     with peerChokeStatusLock:
         return peerChokeStatus.get(peerId, True)
 
+# def applyPreferredNeighborChoking(myPeerId):
+#     currentPreferred = getPreferredNeighbors()
+#     connected = getConnectedPeers()
+
+#     for peerId in connected:
+#         sock = getPeerSocket(peerId)
+#         if sock is None:
+#             continue
+
+#         try:
+#             currentlyChoked = getPeerChokeStatus(peerId)
+
+#             if peerId in currentPreferred:
+#                 if currentlyChoked:
+#                     sendSimpleMessage(sock, 1)
+#                     setPeerChokeStatus(peerId, False)
+#                     print(f"Sent UNCHOKE to peer {peerId}")
+#                     writeLog(myPeerId, f"has unchoked Peer {peerId}.")
+#             else:
+#                 if not currentlyChoked:
+#                     sendSimpleMessage(sock, 0)
+#                     setPeerChokeStatus(peerId, True)
+#                     print(f"Sent CHOKE to peer {peerId}")
+#                     writeLog(myPeerId, f"has choked Peer {peerId}.")
+#         except OSError:
+#             cleanupPeerConnection(peerId)
+#         except Exception as e:
+#             print(f"Error updating choke status for peer {peerId}: {e}")
+#             cleanupPeerConnection(peerId)
 def applyPreferredNeighborChoking(myPeerId):
     currentPreferred = getPreferredNeighbors()
+    currentOptimistic = getOptimisticallyUnchokedNeighbor()
     connected = getConnectedPeers()
 
     for peerId in connected:
@@ -698,8 +816,9 @@ def applyPreferredNeighborChoking(myPeerId):
 
         try:
             currentlyChoked = getPeerChokeStatus(peerId)
+            shouldBeUnchoked = (peerId in currentPreferred) or (peerId == currentOptimistic)
 
-            if peerId in currentPreferred:
+            if shouldBeUnchoked:
                 if currentlyChoked:
                     sendSimpleMessage(sock, 1)
                     setPeerChokeStatus(peerId, False)
@@ -742,6 +861,105 @@ def checkForGlobalCompletion(myPeerId, myBitfield, peerList):
         shutdownEvent.set()
         return True
     return False
+
+def addInterestedPeer(peerId):
+    with interestedPeersLock:
+        interestedPeers.add(peerId)
+
+
+def removeInterestedPeer(peerId):
+    with interestedPeersLock:
+        interestedPeers.discard(peerId)
+
+
+def getInterestedPeers():
+    with interestedPeersLock:
+        return set(interestedPeers)
+
+
+def recordDownloadFromPeer(peerId):
+    with downloadCountsLock:
+        downloadCounts[peerId] = downloadCounts.get(peerId, 0) + 1
+
+
+def getDownloadCountsSnapshot():
+    with downloadCountsLock:
+        return dict(downloadCounts)
+
+
+def resetDownloadCounts():
+    with downloadCountsLock:
+        downloadCounts.clear()
+
+
+def setOptimisticallyUnchokedNeighbor(peerId):
+    global optimisticallyUnchokedNeighbor
+    with optimisticNeighborLock:
+        optimisticallyUnchokedNeighbor = peerId
+
+
+def getOptimisticallyUnchokedNeighbor():
+    with optimisticNeighborLock:
+        return optimisticallyUnchokedNeighbor
+    
+def choosePreferredNeighbors(myBitfield, numberOfPreferredNeighbors):
+    interested = list(getInterestedPeers())
+
+    if len(interested) == 0:
+        return []
+
+    if len(interested) <= numberOfPreferredNeighbors:
+        return interested
+
+    # If this peer already has the whole file, choose randomly among interested peers.
+    if all(myBitfield):
+        return random.sample(interested, numberOfPreferredNeighbors)
+
+    # Otherwise choose interested peers by highest download rate during the previous interval.
+    counts = getDownloadCountsSnapshot()
+    scoredPeers = []
+
+    for peerId in interested:
+        scoredPeers.append((peerId, counts.get(peerId, 0)))
+
+    random.shuffle(scoredPeers)
+    scoredPeers.sort(key=lambda item: item[1], reverse=True)
+
+    chosen = []
+    for peerId, rate in scoredPeers[:numberOfPreferredNeighbors]:
+        chosen.append(peerId)
+
+    return chosen
+    
+def runOptimisticUnchoking(myPeerId, optimisticUnchokingInterval):
+    while not shutdownEvent.is_set():
+        shutdownEvent.wait(optimisticUnchokingInterval)
+        if shutdownEvent.is_set():
+            break
+
+        interested = getInterestedPeers()
+        preferred = getPreferredNeighbors()
+
+        candidates = []
+        for peerId in interested:
+            if peerId not in preferred and getPeerChokeStatus(peerId):
+                candidates.append(peerId)
+
+        if len(candidates) == 0:
+            setOptimisticallyUnchokedNeighbor(None)
+            applyPreferredNeighborChoking(myPeerId)
+            continue
+
+        chosenPeer = random.choice(candidates)
+        previousOptimistic = getOptimisticallyUnchokedNeighbor()
+
+        setOptimisticallyUnchokedNeighbor(chosenPeer)
+
+        if previousOptimistic != chosenPeer:
+            print(f"Optimistically unchoked neighbor for peer {myPeerId}: {chosenPeer}")
+            writeLog(myPeerId, f"has the optimistically unchoked neighbor {chosenPeer}.")
+
+        applyPreferredNeighborChoking(myPeerId)
 
 # Main function
 def main():
@@ -820,7 +1038,8 @@ def main():
 
     numberOfPreferredNeighbors = commonConfig["NumberOfPreferredNeighbors"]
     unchokingInterval = commonConfig["UnchokingInterval"]
-
+    optimisticUnchokingInterval = commonConfig["OptimisticUnchokingInterval"]
+    
     print(f"My file path: {filePath}")
 
     print()
@@ -848,11 +1067,22 @@ def main():
         target=runPreferredNeighborSelection,
         args=(
             currentPeer.peerId,
+            currentPeer.bitfield,
             numberOfPreferredNeighbors,
             unchokingInterval
-        )
+        ),
+        daemon=True
     )
     preferredNeighborThread.start()
+    optimisticUnchokeThread = threading.Thread(
+        target=runOptimisticUnchoking,
+        args=(
+            currentPeer.peerId,
+            optimisticUnchokingInterval
+        ),
+        daemon=True
+    )
+    optimisticUnchokeThread.start()
 
     previousPeers = getPreviousPeers(peerList, peerId)
 
@@ -868,8 +1098,12 @@ def main():
             peerList
         )
 
+    if laterPeerCount == 0 and all(currentPeer.bitfield):
+        print(f"Peer {currentPeer.peerId} has completed the file.")
+        shutdownEvent.set()
+
     serverThread.join()
-    preferredNeighborThread.join()
+    # preferredNeighborThread.join()
 
 
 if __name__ == "__main__":
