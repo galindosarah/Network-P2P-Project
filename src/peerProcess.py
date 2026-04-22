@@ -807,9 +807,9 @@ def getPeerChokeStatus(peerId):
 def applyPreferredNeighborChoking(myPeerId):
     currentPreferred = getPreferredNeighbors()
     currentOptimistic = getOptimisticallyUnchokedNeighbor()
-    connected = getConnectedPeers()
+    interested = getInterestedPeers()
 
-    for peerId in connected:
+    for peerId in interested:
         sock = getPeerSocket(peerId)
         if sock is None:
             continue
@@ -835,7 +835,7 @@ def applyPreferredNeighborChoking(myPeerId):
         except Exception as e:
             print(f"Error updating choke status for peer {peerId}: {e}")
             cleanupPeerConnection(peerId)
-
+            
 def allKnownPeersCompleted(myPeerId, myBitfield, peerList):
     if not all(myBitfield):
         return False
