@@ -8,6 +8,10 @@ from config import loadCommon, loadPeerInfo, findPeerById
 from peer import Peer
 from pathlib import Path
 
+# Global dictionary
+neighborBitfields = {}
+neighborBitfieldsLock = threading.Lock()
+
 # Start server function
 def startServer(port, myPeerId, expectedConnections, myBitfield, filePath, pieceSize, fileSize):
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -27,24 +31,47 @@ def startServer(port, myPeerId, expectedConnections, myBitfield, filePath, piece
         connection.sendall(handshake)
         print(f"Sent handshake from peer {myPeerId}")
 
+        # Receive neighbor bitfield
         messageType, payload = readMessage(connection)
-        if messageType == 5:
-            otherBitfield = payload.decode()
-            print(f"Received bitfield from peer {receivedPeerId}: {otherBitfield}")
+        if messageType != 5:
+            print("Expected BITFIELD message")
+            connection.close()
+            continue
+
+        otherBitfield = payload.decode()
+        storeNeighborBitfield(receivedPeerId, otherBitfield)
+        print(f"Received bitfield from peer {receivedPeerId}: {otherBitfield}")
 
         sendBitfield(connection, myBitfield)
 
+        # Send interested / not interested
         if hasInterestingPieces(myBitfield, otherBitfield):
             sendSimpleMessage(connection, 2)
         else:
             sendSimpleMessage(connection, 3)
 
+        # Receive neighbor interested / not interested
         messageType, payload = readMessage(connection)
         if messageType == 2:
             print(f"Received INTERESTED from peer {receivedPeerId}")
             sendSimpleMessage(connection, 1)
+        elif messageType == 3:
+            print(f"Received NOT INTERESTED from peer {receivedPeerId}")
+            sendSimpleMessage(connection, 0)
+            connection.close()
+            continue
+        else:
+            print("Expected INTERESTED or NOT INTERESTED message")
+            connection.close()
+            continue
 
+        # Keep serving requests on this same connection
+        while True:
             messageType, payload = readMessage(connection)
+
+            if messageType is None:
+                break
+
             if messageType == 6:
                 requestedPieceIndex = struct.unpack(">I", payload)[0]
                 print(f"Received REQUEST for piece {requestedPieceIndex} from peer {receivedPeerId}")
@@ -53,17 +80,21 @@ def startServer(port, myPeerId, expectedConnections, myBitfield, filePath, piece
                 if pieceData is not None:
                     sendPiece(connection, requestedPieceIndex, pieceData)
 
-                    messageType, payload = readMessage(connection)
-                    if messageType == 4:
-                        havePieceIndex = struct.unpack(">I", payload)[0]
-                        print(f"Received HAVE for piece {havePieceIndex} from peer {receivedPeerId}")
+            elif messageType == 4:
+                havePieceIndex = struct.unpack(">I", payload)[0]
+                print(f"Received HAVE for piece {havePieceIndex} from peer {receivedPeerId}")
 
-                        otherBitfield = updateBitfieldWithHave(otherBitfield, havePieceIndex)
-                        print(f"Updated bitfield for peer {receivedPeerId}: {otherBitfield}")
+                updatedBitfield = updateNeighborBitfieldWithHave(receivedPeerId, havePieceIndex)
+                print(f"Updated bitfield for peer {receivedPeerId}: {updatedBitfield}")
 
-        elif messageType == 3:
-            print(f"Received NOT INTERESTED from peer {receivedPeerId}")
-            sendSimpleMessage(connection, 0)
+            elif messageType == 3:
+                print(f"Received NOT INTERESTED from peer {receivedPeerId}")
+                break
+
+            else:
+                print(f"Received unexpected message type {messageType} from peer {receivedPeerId}")
+                break
+
         connection.close()
 
     server.close()
@@ -108,44 +139,79 @@ def connectToPeer(host, port, myPeerId, myBitfield, filePath, pieceSize):
 
     sendBitfield(client, myBitfield)
 
-    # bitfield messaging
+    # Receive neighbor bitfield
     messageType, payload = readMessage(client)
-    if messageType == 5:
-        otherBitfield = payload.decode()
-        print(f"Received bitfield from peer {receivedPeerId}: {otherBitfield}")
+    if messageType != 5:
+        print("Expected BITFIELD message")
+        client.close()
+        return
 
+    otherBitfield = payload.decode()
+    storeNeighborBitfield(receivedPeerId, otherBitfield)
+    print(f"Received bitfield from peer {receivedPeerId}: {otherBitfield}")
+
+    # Send interested / not interested
     if hasInterestingPieces(myBitfield, otherBitfield):
         sendSimpleMessage(client, 2)
     else:
         sendSimpleMessage(client, 3)
 
-    # interested/not interested messaging
+    # Receive neighbor interested / not interested
     messageType, payload = readMessage(client)
     if messageType == 2:
         print(f"Received INTERESTED from peer {receivedPeerId}")
     elif messageType == 3:
         print(f"Received NOT INTERESTED from peer {receivedPeerId}")
 
-    # choke/unchoke messaging 
+    # Receive choke / unchoke
     messageType, payload = readMessage(client)
     if messageType == 0:
         print(f"Received CHOKE from peer {receivedPeerId}")
-    elif messageType == 1:
-        print(f"Received UNCHOKE from peer {receivedPeerId}")
+        client.close()
+        return
+    elif messageType != 1:
+        print("Expected CHOKE or UNCHOKE message")
+        client.close()
+        return
+
+    print(f"Received UNCHOKE from peer {receivedPeerId}")
+
+    # Keep requesting pieces until this neighbor has nothing else useful
+    while True:
+        otherBitfield = getNeighborBitfield(receivedPeerId)
+        if otherBitfield is None:
+            print(f"No stored bitfield for peer {receivedPeerId}")
+            break
 
         pieceToRequest = choosePieceToRequest(myBitfield, otherBitfield)
 
-        if pieceToRequest is not None:
-            sendRequest(client, pieceToRequest)
+        if pieceToRequest is None:
+            print(f"No more interesting pieces from peer {receivedPeerId}")
+            sendSimpleMessage(client, 3)
+            break
 
-            messageType, payload = readMessage(client)
-            if messageType == 7:
-                pieceIndex = struct.unpack(">I", payload[:4])[0]
-                pieceData = payload[4:]
+        sendRequest(client, pieceToRequest)
 
-                print(f"Received PIECE {pieceIndex} from peer {receivedPeerId}")
-                savePiece(myBitfield, filePath, pieceIndex, pieceSize, pieceData)
-                sendHave(client, pieceIndex)
+        messageType, payload = readMessage(client)
+        if messageType != 7:
+            print("Expected PIECE message")
+            break
+
+        pieceIndex = struct.unpack(">I", payload[:4])[0]
+        pieceData = payload[4:]
+
+        print(f"Received PIECE {pieceIndex} from peer {receivedPeerId}")
+        savePiece(myBitfield, filePath, pieceIndex, pieceSize, pieceData)
+        sendHave(client, pieceIndex)
+
+        # Update our local view of the neighbor relationship.
+        # We now have this piece, so future piece selection should not ask for it again.
+        # Since myBitfield is updated by savePiece(), choosePieceToRequest() will skip it.
+
+        # If there are no more interesting pieces, tell the neighbor.
+        if not hasInterestingPieces(myBitfield, otherBitfield):
+            sendSimpleMessage(client, 3)
+            break
 
     client.close()
 
@@ -219,6 +285,24 @@ def readMessage(sock):
 
     return messageType, payload
 
+def storeNeighborBitfield(peerId, bitfieldString):
+    with neighborBitfieldsLock:
+        neighborBitfields[peerId] = bitfieldString
+
+
+def getNeighborBitfield(peerId):
+    with neighborBitfieldsLock:
+        return neighborBitfields.get(peerId)
+
+
+def updateNeighborBitfieldWithHave(peerId, pieceIndex):
+    with neighborBitfieldsLock:
+        if peerId in neighborBitfields:
+            bitfieldList = list(neighborBitfields[peerId])
+            bitfieldList[pieceIndex] = "1"
+            neighborBitfields[peerId] = "".join(bitfieldList)
+            return neighborBitfields[peerId]
+        return None
 
 # Interested/Not Interested functions
 def hasInterestingPieces(myBitfield, otherBitfieldString):
@@ -330,10 +414,10 @@ def sendHave(sock, pieceIndex):
     sock.sendall(message)
     print(f"Sent HAVE for piece {pieceIndex}")
 
-def updateBitfieldWithHave(bitfieldString, pieceIndex):
-    bitfieldList = list(bitfieldString)
-    bitfieldList[pieceIndex] = "1"
-    return "".join(bitfieldList)
+# def updateBitfieldWithHave(bitfieldString, pieceIndex):
+#     bitfieldList = list(bitfieldString)
+#     bitfieldList[pieceIndex] = "1"
+#     return "".join(bitfieldList)
 
 # Peer folder functions
 def createPeerDirectory(peerId):
@@ -369,8 +453,7 @@ def getPieceLength(pieceIndex, pieceSize, fileSize):
 
     if remainingBytes >= pieceSize:
         return pieceSize
-    else:
-        return remainingBytes
+    return remainingBytes
 
 
 def readPieceFromFile(filePath, pieceIndex, pieceSize, fileSize):
