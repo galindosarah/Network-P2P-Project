@@ -50,6 +50,11 @@ peerRemoteChokeStatusLock = threading.Lock()
 peerPendingRequests = {}
 peerPendingRequestsLock = threading.Lock()
 
+peerInterestStatus = {}
+peerInterestStatusLock = threading.Lock()
+
+
+
 # Start server function
 def startServer(port, myPeerId, expectedConnections, myBitfield, filePath, pieceSize, fileSize, totalPeerCount, peerList):
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -112,10 +117,7 @@ def startServer(port, myPeerId, expectedConnections, myBitfield, filePath, piece
 
             sendBitfield(conn, myBitfield)
 
-            if hasInterestingPieces(myBitfield, otherBitfield):
-                sendSimpleMessage(conn, 2)
-            else:
-                sendSimpleMessage(conn, 3)
+            updateInterestState(conn, receivedPeerId, myBitfield, otherBitfield)
 
             messageType, payload = readMessage(conn)
             if messageType == 2:
@@ -183,7 +185,7 @@ def connectToPeer(host, port, myPeerId, myBitfield, filePath, pieceSize, fileSiz
     client = None
     connected = False
 
-    for attempt in range(10):
+    for attempt in range(120):
         try:
             client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             client.connect((host, port))
@@ -245,10 +247,7 @@ def connectToPeer(host, port, myPeerId, myBitfield, filePath, pieceSize, fileSiz
         markPeerCompleted(receivedPeerId)
         print(f"Completed peers: {getCompletedPeerCount()} / {totalPeerCount}")
 
-    if hasInterestingPieces(myBitfield, otherBitfield):
-        sendSimpleMessage(client, 2)
-    else:
-        sendSimpleMessage(client, 3)
+    updateInterestState(client, receivedPeerId, myBitfield, otherBitfield)
 
     messageType, payload = readMessage(client)
     if messageType == 2:
@@ -642,6 +641,7 @@ def cleanupPeerConnection(peerId):
     removeInterestedPeer(peerId)
     removeDownloadingFromPeer(peerId)
     clearPeerRemoteChokeStatus(peerId)
+    clearPeerInterestStatus(peerId)
 
     with peerChokeStatusLock:
         if peerId in peerChokeStatus:
@@ -1061,27 +1061,20 @@ def peerMessageLoop(sock, myPeerId, peerId, myBitfield, filePath, pieceSize, fil
                 if not isPeerCompleted(peerId):
                     markPeerCompleted(peerId)
 
+            shouldBeInterested = False
+            if updatedBitfield is not None:
+                try:
+                    shouldBeInterested = updateInterestState(sock, peerId, myBitfield, updatedBitfield)
+                except OSError:
+                    break
+
             if checkForGlobalCompletion(myPeerId, myBitfield, peerList):
                 break
 
-            updatedBitfield = updateNeighborBitfieldWithHave(peerId, havePieceIndex)
-
-            if updatedBitfield is not None:
-                if hasInterestingPieces(myBitfield, updatedBitfield):
-                    try:
-                        sendSimpleMessage(sock, 2)
-                    except OSError:
-                        break
-                else:
-                    try:
-                        sendSimpleMessage(sock, 3)
-                    except OSError:
-                        break
-
-                if not getPeerRemoteChokeStatus(peerId):
-                    requested = maybeRequestNextPiece(sock, myPeerId, peerId, myBitfield)
-                    if not requested and all(myBitfield):
-                        break
+            if shouldBeInterested and not getPeerRemoteChokeStatus(peerId):
+                requested = maybeRequestNextPiece(sock, myPeerId, peerId, myBitfield)
+                if not requested and all(myBitfield):
+                    break
 
         elif messageType == 6:
             requestedPieceIndex = struct.unpack(">I", payload)[0]
@@ -1113,6 +1106,7 @@ def peerMessageLoop(sock, myPeerId, peerId, myBitfield, filePath, pieceSize, fil
             )
 
             broadcastHave(pieceIndex)
+            reevaluateInterestForAllNeighbors(myBitfield)
 
             if all(myBitfield) and not isPeerCompleted(myPeerId):
                 markPeerCompleted(myPeerId)
@@ -1166,7 +1160,62 @@ def closeAllPeerSockets():
             sock.close()
         except OSError:
             pass
-        
+    
+# def sendInterestMessageIfChanged(sock, peerId, shouldBeInterested):
+#     newType = 2 if shouldBeInterested else 3
+
+#     previousType = lastInterestStateSent.get(peerId)
+#     if previousType == newType:
+#         return
+
+#     sendSimpleMessage(sock, newType)
+#     lastInterestStateSent[peerId] = newType
+
+def setPeerInterestStatus(peerId, isInterested):
+    with peerInterestStatusLock:
+        peerInterestStatus[peerId] = isInterested
+
+
+def getPeerInterestStatus(peerId):
+    with peerInterestStatusLock:
+        return peerInterestStatus.get(peerId)
+
+
+def clearPeerInterestStatus(peerId):
+    with peerInterestStatusLock:
+        if peerId in peerInterestStatus:
+            del peerInterestStatus[peerId]
+
+
+def updateInterestState(sock, peerId, myBitfield, otherBitfieldString):
+    shouldBeInterested = hasInterestingPieces(myBitfield, otherBitfieldString)
+    previousState = getPeerInterestStatus(peerId)
+
+    if previousState is None or previousState != shouldBeInterested:
+        if shouldBeInterested:
+            sendSimpleMessage(sock, 2)
+        else:
+            sendSimpleMessage(sock, 3)
+
+        setPeerInterestStatus(peerId, shouldBeInterested)
+
+    return shouldBeInterested
+
+def reevaluateInterestForAllNeighbors(myBitfield):
+    for otherPeerId in getConnectedPeers():
+        otherSock = getPeerSocket(otherPeerId)
+        if otherSock is None:
+            continue
+
+        otherBitfield = getNeighborBitfield(otherPeerId)
+        if otherBitfield is None:
+            continue
+
+        try:
+            updateInterestState(otherSock, otherPeerId, myBitfield, otherBitfield)
+        except OSError:
+            cleanupPeerConnection(otherPeerId)
+
 # Main function
 def main():
     if len(sys.argv) != 2:
